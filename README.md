@@ -10,6 +10,8 @@ This proxy validates and normalises responses back to OpenAI shapes, as specifie
 - **Error handling**: OpenAI-compatible error responses
 - **Streaming support**: Server-Sent Events (SSE) for streaming responses
 - **Response Validation**: All responses are validated and normalised to match OpenAI shapes.
+- **Advanced Parameter Support**: Handles `stop` sequences, `max_tokens`, and `temperature`.
+- **Role Mapping**: Automatically maps `developer` and `system` roles for compatibility.
 
 ## Coming Soon
 
@@ -37,15 +39,15 @@ async fn main() {
     // Configure the backend
     let config = BackendConfig {
         url: "http://localhost:8080".to_string(),
-        timeout_secs: 60,
-        ..Default::default()
+        model: "llama-3.1-8b".to_string(),
+        models: vec!["llama-3.1-8b".to_string()],
     };
     
     // Create the backend
     let backend = Arc::new(LlamaBackend::new(config));
     
-    // Run the proxy server on port 8080
-    run_proxy(backend, 8080).await.unwrap();
+    // Run the proxy server on port 8081
+    run_proxy(backend, 8081).await.unwrap();
 }
 ```
 
@@ -88,26 +90,17 @@ To implement a custom backend, implement the `InferenceBackend` trait:
 
 ```rust
 use async_trait::async_trait;
+use futures_util::stream::BoxStream;
 use openai_proxy::{
     CreateChatCompletionRequest, CreateChatCompletionResponse,
-    BackendConfig, BackendResult, InferenceBackend, StreamResponse,
+    CreateChatCompletionStreamResponse,
+    BackendResult, InferenceBackend,
 };
 
-struct MyCustomBackend {
-    config: BackendConfig,
-    // Your backend-specific fields
-}
+struct MyCustomBackend;
 
 #[async_trait]
 impl InferenceBackend for MyCustomBackend {
-    fn name(&self) -> &str {
-        "my-custom-backend"
-    }
-
-    fn supports_model(&self, model: &str) -> bool {
-        true // Your logic
-    }
-
     async fn create_chat_completion(
         &self,
         request: CreateChatCompletionRequest,
@@ -119,13 +112,18 @@ impl InferenceBackend for MyCustomBackend {
     async fn create_chat_completion_stream(
         &self,
         request: CreateChatCompletionRequest,
-    ) -> BackendResult<StreamResponse> {
+    ) -> BackendResult<BoxStream<'static, BackendResult<CreateChatCompletionStreamResponse>>> {
         // Your implementation
         todo!()
     }
 
-    async fn health_check(&self) -> BackendResult<()> {
-        Ok(())
+    async fn list_models(&self) -> BackendResult<serde_json::Value> {
+        // Your implementation
+        todo!()
+    }
+
+    async fn health(&self) -> BackendResult<bool> {
+        Ok(true)
     }
 }
 ```
