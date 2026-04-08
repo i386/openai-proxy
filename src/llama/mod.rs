@@ -2,19 +2,21 @@
 //! This module provides integration with llama.cpp's server
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
+use async_stream::stream;
 use reqwest::Client;
 use serde_json::json;
 
 use tracing::{info, error};
 
 use crate::backend::{
-    BackendConfig, BackendResult,
+    BackendConfig, BackendResult, BoxStream,
     InferenceBackend,
 };
 use crate::types::{
-    ChatCompletionChoice, ChatCompletionMessage, ChatMessage, CreateChatCompletionRequest, 
-    CreateChatCompletionResponse, CreateChatCompletionStreamResponse, MessageRole, 
-    StreamChoice, StreamDelta, Usage,
+    ChatCompletionChoice, ChatCompletionMessage, ChatMessage, ChatMessageContent,
+    CreateChatCompletionRequest, CreateChatCompletionResponse, CreateChatCompletionStreamResponse,
+    MessageRole, StreamChoice, StreamDelta, Usage,
 };
 
 mod error;
@@ -41,16 +43,24 @@ impl LlamaBackend {
             .messages
             .iter()
             .map(|msg| {
-                json!({
-                    "role": match msg.role {
-                        MessageRole::System => "system",
-                        MessageRole::User => "user",
-                        MessageRole::Assistant => "assistant",
-                        MessageRole::Tool => "tool",
-                        MessageRole::Developer => "developer",
-                    },
-                    "content": msg.content,
-                })
+                let role = match msg.role {
+                    MessageRole::System => "system",
+                    MessageRole::User => "user",
+                    MessageRole::Assistant => "assistant",
+                    MessageRole::Tool => "tool",
+                    MessageRole::Developer => "developer",
+                };
+
+                match &msg.content {
+                    ChatMessageContent::Text(text) => json!({
+                        "role": role,
+                        "content": text,
+                    }),
+                    ChatMessageContent::Parts(parts) => json!({
+                        "role": role,
+                        "content": parts,
+                    }),
+                }
             })
             .collect();
 
@@ -90,7 +100,7 @@ impl LlamaBackend {
         &self,
         url: &str,
         body: serde_json::Value,
-    ) -> BackendResult<CreateChatCompletionStreamResponse> {
+    ) -> BackendResult<BoxStream<'static, BackendResult<CreateChatCompletionStreamResponse>>> {
         let response = self
             .client
             .post(url)
@@ -106,19 +116,48 @@ impl LlamaBackend {
             return Err(map_llama_error(status, error_json).into());
         }
 
-        let text = response.text().await.map_err(|e| {
-            anyhow::anyhow!("Failed to read stream: {}", e)
-        })?;
+        let model = self.config.model.clone();
+        let mut bytes_stream = response.bytes_stream();
+        
+        let s = stream! {
+            let mut buffer = String::new();
+            while let Some(item) = bytes_stream.next().await {
+                let item = match item {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        yield Err(anyhow::anyhow!("Stream error: {}", e));
+                        break;
+                    }
+                };
+                
+                let text = String::from_utf8_lossy(&item);
+                buffer.push_str(&text);
+                
+                let mut choices = Vec::new();
+                let mut last_newline_pos = 0;
+                
+                for (i, _) in buffer.match_indices('\n') {
+                    let line = &buffer[last_newline_pos..i].trim();
+                    if !line.is_empty() && line.starts_with("data: ") {
+                        let parsed = parse_stream_response(line);
+                        choices.extend(parsed);
+                    }
+                    last_newline_pos = i + 1;
+                }
+                
+                buffer = buffer[last_newline_pos..].to_string();
 
-        let choices = parse_stream_response(&text);
+                yield Ok(CreateChatCompletionStreamResponse {
+                    id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
+                    object: "chat.completion.chunk".to_string(),
+                    created: chrono::Utc::now().timestamp(),
+                    model: model.clone(),
+                    choices,
+                });
+            }
+        };
 
-        Ok(CreateChatCompletionStreamResponse {
-            id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
-            object: "chat.completion.chunk".to_string(),
-            created: chrono::Utc::now().timestamp(),
-            model: self.config.model.clone(),
-            choices,
-        })
+        Ok(Box::pin(s))
     }
 }
 
@@ -180,7 +219,7 @@ impl InferenceBackend for LlamaBackend {
     async fn create_chat_completion_stream(
         &self,
         request: CreateChatCompletionRequest,
-    ) -> BackendResult<CreateChatCompletionStreamResponse> {
+    ) -> BackendResult<BoxStream<'static, BackendResult<CreateChatCompletionStreamResponse>>> {
         let url = format!("{}/v1/chat/completions", self.config.url());
         let mut req = request;
         req.stream = Some(true);
@@ -241,13 +280,13 @@ fn map_llama_response(
                 .map(|choice| {
                     let message = choice.get("message").map(|m| ChatMessage {
                         role: MessageRole::Assistant,
-                        content: m.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string(),
+                        content: ChatMessageContent::Text(m.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string()),
                         name: m.get("name").and_then(|n| n.as_str()).map(String::from),
                         tool_calls: None,
                         tool_call_id: None,
                     }).unwrap_or(ChatMessage {
                         role: MessageRole::Assistant,
-                        content: "".to_string(),
+                        content: ChatMessageContent::Text("".to_string()),
                         name: None,
                         tool_calls: None,
                         tool_call_id: None,
@@ -267,7 +306,7 @@ fn map_llama_response(
                         index: choice.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as i32,
                         message: ChatCompletionMessage {
                             role: role_str.to_string(),
-                            content: Some(message.content),
+                            content: Some(message.content.as_str()),
                             tool_calls: None,
                             refusal: None,
                             annotations: None,
@@ -372,7 +411,7 @@ mod tests {
             messages: vec![
                 ChatMessage {
                     role: MessageRole::User,
-                    content: "Hello".to_string(),
+                    content: ChatMessageContent::Text("Hello".to_string()),
                     ..Default::default()
                 }
             ],
@@ -401,7 +440,7 @@ mod tests {
             messages: vec![
                 ChatMessage {
                     role: MessageRole::User,
-                    content: "Hello".to_string(),
+                    content: ChatMessageContent::Text("Hello".to_string()),
                     ..Default::default()
                 }
             ],
@@ -479,5 +518,62 @@ mod tests {
         assert_eq!(choices[0].delta.as_ref().unwrap().content, Some("Hello".to_string()));
         assert_eq!(choices[1].delta.as_ref().unwrap().content, Some(" world".to_string()));
         assert_eq!(choices[1].finish_reason, Some("stop".to_string()));
+    }
+
+    #[test]
+    fn test_map_request_multimodal() {
+        let config = BackendConfig {
+            url: "http://localhost:8080".to_string(),
+            model: "test-model".to_string(),
+            models: vec!["test-model".to_string()],
+        };
+        let backend = LlamaBackend::new(config);
+
+        let request = CreateChatCompletionRequest {
+            model: "test-model".to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: MessageRole::User,
+                    content: ChatMessageContent::Parts(vec![
+                        crate::types::ChatMessagePart::Text {
+                            text: "What's in this image?".to_string(),
+                        },
+                        crate::types::ChatMessagePart::ImageUrl {
+                            image_url: crate::types::ImageUrl {
+                                url: "data:image/jpeg;base64,abc".to_string(),
+                                detail: Some("high".to_string()),
+                            },
+                        },
+                        crate::types::ChatMessagePart::InputAudio {
+                            input_audio: crate::types::InputAudio {
+                                data: "audio-data".to_string(),
+                                format: "wav".to_string(),
+                            },
+                        },
+                    ]),
+                    ..Default::default()
+                }
+            ],
+            ..Default::default()
+        };
+
+        let mapped = backend.map_request(&request);
+
+        assert_eq!(mapped["messages"][0]["role"], "user");
+        let content = &mapped["messages"][0]["content"];
+        assert!(content.is_array());
+        let parts = content.as_array().unwrap();
+        assert_eq!(parts.len(), 3);
+
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "What's in this image?");
+
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/jpeg;base64,abc");
+        assert_eq!(parts[1]["image_url"]["detail"], "high");
+
+        assert_eq!(parts[2]["type"], "input_audio");
+        assert_eq!(parts[2]["input_audio"]["data"], "audio-data");
+        assert_eq!(parts[2]["input_audio"]["format"], "wav");
     }
 }

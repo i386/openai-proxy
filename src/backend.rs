@@ -3,14 +3,16 @@
 
 
 use async_trait::async_trait;
+use futures_util::Stream;
+use std::pin::Pin;
 
 use crate::types::{
     CreateChatCompletionRequest, CreateChatCompletionResponse, 
     CreateChatCompletionStreamResponse, ErrorResponse,
 };
 
-/// Result type for backend operations
 pub type BackendResult<T> = anyhow::Result<T>;
+pub type BoxStream<'a, T> = Pin<Box<dyn Stream<Item = T> + Send + 'a>>;
 
 /// Errors that can occur in the backend
 #[derive(Debug, Clone)]
@@ -197,7 +199,7 @@ impl Default for BackendConfig {
 }
 
 /// Stream response from the backend
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct StreamResponse {
     pub chunk: String,
     pub is_final: bool,
@@ -216,7 +218,7 @@ pub trait InferenceBackend: Send + Sync {
     async fn create_chat_completion_stream(
         &self,
         request: CreateChatCompletionRequest,
-    ) -> BackendResult<CreateChatCompletionStreamResponse>;
+    ) -> BackendResult<BoxStream<'static, BackendResult<CreateChatCompletionStreamResponse>>>;
 
     /// List available models
     async fn list_models(&self) -> BackendResult<serde_json::Value>;

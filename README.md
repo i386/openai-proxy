@@ -1,17 +1,21 @@
 # openai-proxy
 
-OpenAI-compatible proxy for different inference backends (llama.cpp, MLX, vLLM, etc.)
+OpenAI-compatible proxy for the llama.cpp inference backend. MLX, vLLM and others coming later.
 
-This crate provides a way to serve OpenAI-compatible API responses using various inference backends, mapping their responses to match the OpenAI API format exactly as specified in `openapi.with-code-samples.yml`.
+This proxy validates and normalises responses back to OpenAI shapes, as specified in `openapi.with-code-samples.yml`.
 
 ## Features
 
 - **llama.cpp backend**: Connect to llama.cpp server instances
+- **Error handling**: OpenAI-compatible error responses
+- **Streaming support**: Server-Sent Events (SSE) for streaming responses
+- **Response Validation**: All responses are validated and normalised to match OpenAI shapes.
+
+## Coming Soon
+
 - **MLX backend**: Support for Apple Silicon MLX inference
 - **vLLM backend**: Integration with vLLM servers
 - **Custom backends**: Easy trait for implementing your own backend
-- **Error handling**: OpenAI-compatible error responses
-- **Streaming support**: Server-Sent Events (SSE) for streaming responses
 
 ## Installation
 
@@ -19,7 +23,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-openai-proxy = { version = "0.1", features = ["llama-backend", "mlx-backend"] }
+openai-proxy = { version = "0.1", features = ["llama-backend"] }
 ```
 
 ## Quick Start
@@ -47,7 +51,7 @@ async fn main() {
 
 ## API Compatibility
 
-This proxy is designed to be compatible with the OpenAI API as defined in `openapi.with-code-samples.yml`. It supports:
+This proxy is designed to be compatible with the OpenAI API as defined in `openapi.yml`. It supports:
 
 ### Endpoints
 

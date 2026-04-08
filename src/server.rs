@@ -5,14 +5,16 @@
 use std::sync::Arc;
 use std::convert::Infallible;
 
-use hyper::body::Bytes;
-use http_body_util::{BodyExt, Full};
+use hyper::body::{Bytes, Frame};
+use http_body_util::{BodyExt, Full, StreamBody};
+use http_body_util::combinators::UnsyncBoxBody;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tracing::{info, error};
 use tokio::net::TcpListener;
+use futures_util::{StreamExt, stream};
 
 use crate::backend::InferenceBackend;
 use crate::types::{CreateChatCompletionRequest, ErrorResponse};
@@ -66,7 +68,7 @@ impl OpenAIProxy {
         &self,
         req: Request<hyper::body::Incoming>,
         backend: &dyn InferenceBackend,
-    ) -> Result<Response<Full<Bytes>>, Infallible> {
+    ) -> Result<Response<UnsyncBoxBody<Bytes, Infallible>>, Infallible> {
         let path = req.uri().path();
         let method = req.method().clone();
 
@@ -79,9 +81,10 @@ impl OpenAIProxy {
             
             // Health check endpoint
             (Method::GET, "/health") | (Method::GET, "/v1/health") => {
+                let body = Full::new(Bytes::from(serde_json::json!({"status": "ok"}).to_string().into_bytes()));
                 Ok(Response::builder()
                     .status(StatusCode::OK)
-                    .body(Full::new(Bytes::from(serde_json::json!({"status": "ok"}).to_string().into_bytes())))
+                    .body(UnsyncBoxBody::new(body))
                     .unwrap())
             }
 
@@ -93,12 +96,40 @@ impl OpenAIProxy {
             // Catch-all for not found
             _ => {
                 let error = ErrorResponse::not_found(format!("Unknown endpoint: {}", path));
+                let body = Full::new(Bytes::from(serde_json::to_vec(&error).unwrap()));
                 Ok(Response::builder()
                     .status(StatusCode::NOT_FOUND)
-                    .body(Full::new(Bytes::from(serde_json::to_vec(&error).unwrap())))
+                    .body(UnsyncBoxBody::new(body))
                     .unwrap())
             }
         }
+    }
+
+    fn handle_error(&self, e: anyhow::Error) -> Result<Response<UnsyncBoxBody<Bytes, Infallible>>, Infallible> {
+        let (status, error_response) = if let Some(be) = e.downcast_ref::<crate::backend::BackendError>() {
+            let status = match be.error_type {
+                crate::backend::ErrorType::InvalidRequest => StatusCode::BAD_REQUEST,
+                crate::backend::ErrorType::Authentication => StatusCode::UNAUTHORIZED,
+                crate::backend::ErrorType::Permission => StatusCode::FORBIDDEN,
+                crate::backend::ErrorType::NotFound => StatusCode::NOT_FOUND,
+                crate::backend::ErrorType::RateLimit => StatusCode::TOO_MANY_REQUESTS,
+                crate::backend::ErrorType::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+                crate::backend::ErrorType::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+                crate::backend::ErrorType::ContextLengthExceeded => StatusCode::BAD_REQUEST,
+                crate::backend::ErrorType::UnsupportedFeature => StatusCode::NOT_IMPLEMENTED,
+            };
+            (status, be.to_error_response())
+        } else {
+            (StatusCode::INTERNAL_SERVER_ERROR, ErrorResponse::internal(e.to_string()))
+        };
+
+        let body = Full::new(Bytes::from(serde_json::to_vec(&error_response).unwrap()));
+            
+        Ok(Response::builder()
+            .status(status)
+            .header("Content-Type", "application/json")
+            .body(UnsyncBoxBody::new(body))
+            .unwrap())
     }
 
     /// Handle chat completions request
@@ -106,7 +137,7 @@ impl OpenAIProxy {
         &self,
         req: Request<hyper::body::Incoming>,
         backend: &dyn InferenceBackend,
-    ) -> Result<Response<Full<Bytes>>, Infallible> {
+    ) -> Result<Response<UnsyncBoxBody<Bytes, Infallible>>, Infallible> {
         let path = req.uri().path().to_string();
         // Parse the request body
         let body_bytes = match req.collect().await {
@@ -116,9 +147,10 @@ impl OpenAIProxy {
                     format!("Failed to read request body: {}", e),
                     None,
                 );
+                let body = UnsyncBoxBody::new(Full::new(Bytes::from(serde_json::to_vec(&error).unwrap())));
                 return Ok(Response::builder()
                     .status(StatusCode::BAD_REQUEST)
-                    .body(Full::new(Bytes::from(serde_json::to_vec(&error).unwrap())))
+                    .body(body)
                     .unwrap());
             }
         };
@@ -131,9 +163,10 @@ impl OpenAIProxy {
                     format!("Invalid JSON in request body: {}", e),
                     Some("body".to_string()),
                 );
+                let body = UnsyncBoxBody::new(Full::new(Bytes::from(serde_json::to_vec(&error).unwrap())));
                 return Ok(Response::builder()
                     .status(StatusCode::BAD_REQUEST)
-                    .body(Full::new(Bytes::from(serde_json::to_vec(&error).unwrap())))
+                    .body(body)
                     .unwrap());
             }
         };
@@ -208,9 +241,10 @@ impl OpenAIProxy {
                     format!("Invalid request after normalization: {}", e),
                     None,
                 );
+                let body = UnsyncBoxBody::new(Full::new(Bytes::from(serde_json::to_vec(&error).unwrap())));
                 return Ok(Response::builder()
                     .status(StatusCode::BAD_REQUEST)
-                    .body(Full::new(Bytes::from(serde_json::to_vec(&error).unwrap())))
+                    .body(body)
                     .unwrap());
             }
         };
@@ -221,9 +255,10 @@ impl OpenAIProxy {
                 "Missing required parameter: model",
                 Some("model".to_string()),
             );
+            let body = UnsyncBoxBody::new(Full::new(Bytes::from(serde_json::to_vec(&error).unwrap())));
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(Full::new(Bytes::from(serde_json::to_vec(&error).unwrap())))
+                .body(body)
                 .unwrap());
         }
 
@@ -232,9 +267,10 @@ impl OpenAIProxy {
                 "Missing required parameter: messages",
                 Some("messages".to_string()),
             );
+            let body = UnsyncBoxBody::new(Full::new(Bytes::from(serde_json::to_vec(&error).unwrap())));
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(Full::new(Bytes::from(serde_json::to_vec(&error).unwrap())))
+                .body(body)
                 .unwrap());
         }
 
@@ -242,80 +278,72 @@ impl OpenAIProxy {
         let stream = request.stream.unwrap_or(false);
 
         // Call the backend
-        let result = if stream {
-            // For streaming, we'd need a different approach
-            // This is a simplified version
-            let non_stream_request = CreateChatCompletionRequest {
-                stream: Some(false),
-                ..request
-            };
-            backend.create_chat_completion(non_stream_request).await
-        } else {
-            backend.create_chat_completion(request).await
-        };
+        if stream {
+            match backend.create_chat_completion_stream(request).await {
+                Ok(stream) => {
+                    let sse_stream = stream.map(|res| {
+                        match res {
+                            Ok(chunk) => {
+                                let data = serde_json::to_string(&chunk).unwrap_or_default();
+                                Ok::<Frame<Bytes>, Infallible>(Frame::data(Bytes::from(format!("data: {}\n\n", data))))
+                            }
+                            Err(e) => {
+                                let error_resp = ErrorResponse::internal(e.to_string());
+                                let data = serde_json::to_string(&error_resp).unwrap_or_default();
+                                Ok::<Frame<Bytes>, Infallible>(Frame::data(Bytes::from(format!("data: {}\n\n", data))))
+                            }
+                        }
+                    });
 
-        match result {
-            Ok(response) => {
-                let json = serde_json::to_vec(&response).unwrap();
-                Ok(Response::builder()
-                    .status(StatusCode::OK)
-                    .header("Content-Type", "application/json")
-                    .body(Full::new(Bytes::from(json)))
-                    .unwrap())
+                    // Add the [DONE] message at the end
+                    let final_stream = sse_stream.chain(stream::once(async {
+                        Ok::<Frame<Bytes>, Infallible>(Frame::data(Bytes::from("data: [DONE]\n\n")))
+                    }));
+
+                    let body = UnsyncBoxBody::new(StreamBody::new(final_stream));
+                    
+                    Ok(Response::builder()
+                        .status(StatusCode::OK)
+                        .header("Content-Type", "text/event-stream")
+                        .header("Cache-Control", "no-cache")
+                        .header("Connection", "keep-alive")
+                        .body(body)
+                        .unwrap())
+                }
+                Err(e) => {
+                    self.handle_error(e.into())
+                }
             }
-            Err(e) => {
-                let (status, error_response) = if let Some(be) = e.downcast_ref::<crate::backend::BackendError>() {
-                    let status = match be.error_type {
-                        crate::backend::ErrorType::InvalidRequest => StatusCode::BAD_REQUEST,
-                        crate::backend::ErrorType::Authentication => StatusCode::UNAUTHORIZED,
-                        crate::backend::ErrorType::Permission => StatusCode::FORBIDDEN,
-                        crate::backend::ErrorType::NotFound => StatusCode::NOT_FOUND,
-                        crate::backend::ErrorType::RateLimit => StatusCode::TOO_MANY_REQUESTS,
-                        crate::backend::ErrorType::Internal => StatusCode::INTERNAL_SERVER_ERROR,
-                        crate::backend::ErrorType::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-                        crate::backend::ErrorType::ContextLengthExceeded => StatusCode::BAD_REQUEST,
-                        crate::backend::ErrorType::UnsupportedFeature => StatusCode::NOT_IMPLEMENTED,
-                    };
-                    (status, be.to_error_response())
-                } else {
-                    (StatusCode::INTERNAL_SERVER_ERROR, ErrorResponse::internal(e.to_string()))
-                };
-
-                Ok(Response::builder()
-                    .status(status)
-                    .header("Content-Type", "application/json")
-                    .body(Full::new(Bytes::from(serde_json::to_vec(&error_response).unwrap())))
-                    .unwrap())
+        } else {
+            match backend.create_chat_completion(request).await {
+                Ok(response) => {
+                    let json = serde_json::to_vec(&response).unwrap();
+                    Ok(Response::builder()
+                        .status(StatusCode::OK)
+                        .header("Content-Type", "application/json")
+                        .body(UnsyncBoxBody::new(Full::new(Bytes::from(json))))
+                        .unwrap())
+                }
+                Err(e) => {
+                    self.handle_error(e.into())
+                }
             }
         }
     }
 
     /// Handle list models request
-    async fn handle_list_models(&self) -> Result<Response<Full<Bytes>>, Infallible> {
+    async fn handle_list_models(&self) -> Result<Response<UnsyncBoxBody<Bytes, Infallible>>, Infallible> {
         match self.backend.list_models().await {
             Ok(models) => {
+                let body = UnsyncBoxBody::new(Full::new(Bytes::from(serde_json::to_vec(&models).unwrap())));
                 Ok(Response::builder()
                     .status(StatusCode::OK)
                     .header("Content-Type", "application/json")
-                    .body(Full::new(Bytes::from(serde_json::to_vec(&models).unwrap())))
+                    .body(body)
                     .unwrap())
             }
             Err(e) => {
-                let (status, error_response) = if let Some(be) = e.downcast_ref::<crate::backend::BackendError>() {
-                    let status = match be.error_type {
-                        crate::backend::ErrorType::NotFound => StatusCode::NOT_FOUND,
-                        _ => StatusCode::INTERNAL_SERVER_ERROR,
-                    };
-                    (status, be.to_error_response())
-                } else {
-                    (StatusCode::INTERNAL_SERVER_ERROR, ErrorResponse::internal(e.to_string()))
-                };
-
-                Ok(Response::builder()
-                    .status(status)
-                    .header("Content-Type", "application/json")
-                    .body(Full::new(Bytes::from(serde_json::to_vec(&error_response).unwrap())))
-                    .unwrap())
+                self.handle_error(e.into())
             }
         }
     }

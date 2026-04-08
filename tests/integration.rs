@@ -118,13 +118,10 @@ async fn test_llama_live_integration_suite() {
         let request = CreateChatCompletionRequest {
             model: "qwen-live".to_string(),
             messages: vec![
-                ChatMessage {
-                    role: MessageRole::User,
-                    content: "Say 'Hello, I am a live model' and nothing else.".to_string(),
-                    name: None,
-                    tool_calls: None,
-                    tool_call_id: None,
-                }
+                ChatMessage::new(
+                    MessageRole::User,
+                    "Say 'Hello, I am a live model' and nothing else.",
+                )
             ],
             temperature: Some(0.0),
             ..Default::default()
@@ -149,19 +146,16 @@ async fn test_llama_live_integration_suite() {
         assert!(body["usage"]["total_tokens"].as_u64().is_some());
     }
 
-    // --- Test Chat Completion Stream (degraded) ---
+    // --- Test Chat Completion Stream ---
     {
         let proxy_url = format!("{}/v1/chat/completions", proxy_base_url);
         let request = CreateChatCompletionRequest {
             model: "qwen-live-stream".to_string(),
             messages: vec![
-                ChatMessage {
-                    role: MessageRole::User,
-                    content: "Say 'Hello, I am a live model streaming' and nothing else.".to_string(),
-                    name: None,
-                    tool_calls: None,
-                    tool_call_id: None,
-                }
+                ChatMessage::new(
+                    MessageRole::User,
+                    "Say 'Hello, I am a live model streaming' and nothing else.",
+                )
             ],
             stream: Some(true),
             temperature: Some(0.0),
@@ -169,18 +163,32 @@ async fn test_llama_live_integration_suite() {
         };
 
         println!("Sending streaming request to proxy at {}...", proxy_url);
-        let response = client.post(&proxy_url)
+        let mut response = client.post(&proxy_url)
             .json(&request)
             .send()
             .await
             .expect("Failed to send request to proxy");
 
         assert_eq!(response.status(), 200);
-        let body: serde_json::Value = response.json().await.unwrap();
-        let content = body["choices"][0]["message"]["content"].as_str().unwrap();
-        println!("Received content: {}", content);
-        assert!(content.to_lowercase().contains("hello"));
-        assert!(content.to_lowercase().contains("streaming"));
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+
+        let mut full_content = String::new();
+        while let Some(chunk) = response.chunk().await.expect("Failed to read chunk") {
+            let text = String::from_utf8_lossy(&chunk);
+            for line in text.lines() {
+                if line.starts_with("data: ") && !line.contains("[DONE]") {
+                    let json_str = &line[6..];
+                    let body: serde_json::Value = serde_json::from_str(json_str).expect("Failed to parse SSE JSON");
+                    if let Some(content) = body["choices"][0]["delta"]["content"].as_str() {
+                        full_content.push_str(content);
+                    }
+                }
+            }
+        }
+        
+        println!("Received streaming content: {}", full_content);
+        assert!(full_content.to_lowercase().contains("model"));
+        assert!(full_content.to_lowercase().contains("streaming"));
     }
 
     // --- Test List Models ---
@@ -262,6 +270,89 @@ async fn test_llama_live_integration_suite() {
         let content = body["choices"][0]["message"]["content"].as_str().unwrap();
         println!("Received /v1/responses response: {}", content);
         assert!(content.to_lowercase().contains("hi") || content.to_lowercase().contains("hello"));
+    }
+
+    // --- Test Multi-turn Conversation ---
+    {
+        let proxy_url = format!("{}/v1/chat/completions", proxy_base_url);
+        let request = CreateChatCompletionRequest {
+            model: "qwen-live".to_string(),
+            messages: vec![
+                ChatMessage::new(MessageRole::User, "My name is Alice."),
+                ChatMessage::new(MessageRole::Assistant, "Hello Alice! How can I help you?"),
+                ChatMessage::new(MessageRole::User, "What is my name? Say only the name."),
+            ],
+            temperature: Some(0.0),
+            ..Default::default()
+        };
+
+        println!("Sending multi-turn request to proxy at {}...", proxy_url);
+        let response = client.post(&proxy_url)
+            .json(&request)
+            .send()
+            .await
+            .expect("Failed to send request to proxy");
+
+        assert_eq!(response.status(), 200);
+        let body: serde_json::Value = response.json().await.unwrap();
+        let content = body["choices"][0]["message"]["content"].as_str().unwrap();
+        println!("Received multi-turn response: {}", content);
+        assert!(content.contains("Alice"));
+    }
+
+    // --- Test Stop Sequences ---
+    {
+        let proxy_url = format!("{}/v1/chat/completions", proxy_base_url);
+        let request = CreateChatCompletionRequest {
+            model: "qwen-live".to_string(),
+            messages: vec![
+                ChatMessage::new(MessageRole::User, "Count from 1 to 5. Stop before 3."),
+            ],
+            stop: Some(vec!["3".to_string()]),
+            temperature: Some(0.0),
+            ..Default::default()
+        };
+
+        println!("Sending request with stop sequences to proxy at {}...", proxy_url);
+        let response = client.post(&proxy_url)
+            .json(&request)
+            .send()
+            .await
+            .expect("Failed to send request to proxy");
+
+        assert_eq!(response.status(), 200);
+        let body: serde_json::Value = response.json().await.unwrap();
+        let content = body["choices"][0]["message"]["content"].as_str().unwrap();
+        println!("Received stop sequence response: {}", content);
+        assert!(!content.contains('3'));
+        assert!(!content.contains('4'));
+    }
+
+    // --- Test Max Tokens ---
+    {
+        let proxy_url = format!("{}/v1/chat/completions", proxy_base_url);
+        let request = CreateChatCompletionRequest {
+            model: "qwen-live".to_string(),
+            messages: vec![
+                ChatMessage::new(MessageRole::User, "Write a long poem about the sea."),
+            ],
+            max_tokens: Some(5),
+            temperature: Some(0.0),
+            ..Default::default()
+        };
+
+        println!("Sending request with max_tokens=5 to proxy at {}...", proxy_url);
+        let response = client.post(&proxy_url)
+            .json(&request)
+            .send()
+            .await
+            .expect("Failed to send request to proxy");
+
+        assert_eq!(response.status(), 200);
+        let body: serde_json::Value = response.json().await.unwrap();
+        let finish_reason = body["choices"][0]["finish_reason"].as_str().unwrap();
+        println!("Received max_tokens response with finish_reason: {}", finish_reason);
+        assert_eq!(finish_reason, "length");
     }
 
     // --- Test Parameter Aliasing & Role Mapping (OpenAI compatibility) ---

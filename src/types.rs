@@ -63,7 +63,7 @@ pub struct ChatMessage {
     pub role: MessageRole,
     /// Content of the message
     #[serde(default)]
-    pub content: String,
+    pub content: ChatMessageContent,
     /// Name of the sender
     #[serde(default)]
     pub name: Option<String>,
@@ -73,6 +73,102 @@ pub struct ChatMessage {
     /// Tool call ID (for tool messages)
     #[serde(default)]
     pub tool_call_id: Option<String>,
+}
+
+/// Content of the message
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ChatMessageContent {
+    /// Text content
+    Text(String),
+    /// Multi-part content
+    Parts(Vec<ChatMessagePart>),
+}
+
+impl Default for ChatMessageContent {
+    fn default() -> Self {
+        Self::Text(String::new())
+    }
+}
+
+impl ChatMessage {
+    pub fn new(role: MessageRole, content: impl Into<ChatMessageContent>) -> Self {
+        Self {
+            role,
+            content: content.into(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+}
+
+impl From<String> for ChatMessageContent {
+    fn from(s: String) -> Self {
+        ChatMessageContent::Text(s)
+    }
+}
+
+impl From<&str> for ChatMessageContent {
+    fn from(s: &str) -> Self {
+        ChatMessageContent::Text(s.to_string())
+    }
+}
+
+impl ChatMessageContent {
+    pub fn as_str(&self) -> String {
+        match self {
+            Self::Text(s) => s.clone(),
+            Self::Parts(parts) => parts
+                .iter()
+                .filter_map(|part| match part {
+                    ChatMessagePart::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+        }
+    }
+}
+
+/// Part of a multi-part message content
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChatMessagePart {
+    /// Text part
+    Text {
+        /// Text content
+        text: String,
+    },
+    /// Image part
+    ImageUrl {
+        /// Image URL or base64 data
+        image_url: ImageUrl,
+    },
+    /// Audio part
+    InputAudio {
+        /// Audio data
+        input_audio: InputAudio,
+    },
+}
+
+/// Image URL details
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUrl {
+    /// URL of the image or base64-encoded image data
+    pub url: String,
+    /// Detail level (optional)
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+/// Input audio details
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputAudio {
+    /// Base64-encoded audio data
+    pub data: String,
+    /// Audio format (optional)
+    pub format: String,
 }
 
 /// Role of the message sender
