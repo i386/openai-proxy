@@ -442,37 +442,6 @@ pub struct Error {
     pub r#type: String,
 }
 
-/// Error types that match OpenAI's error format
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ErrorType {
-    InvalidRequestError,
-    AuthenticationError,
-    PermissionError,
-    NotFoundError,
-    RateLimitError,
-    InternalServerError,
-    ServiceUnavailableError,
-    ContextLengthExceededError,
-    Unknown,
-}
-
-impl ErrorType {
-    pub fn as_str(&self) -> &str {
-        match self {
-            ErrorType::InvalidRequestError => "invalid_request_error",
-            ErrorType::AuthenticationError => "authentication_error",
-            ErrorType::PermissionError => "permission_error",
-            ErrorType::NotFoundError => "not_found_error",
-            ErrorType::RateLimitError => "rate_limit_error",
-            ErrorType::InternalServerError => "internal_server_error",
-            ErrorType::ServiceUnavailableError => "service_unavailable_error",
-            ErrorType::ContextLengthExceededError => "context_length_exceeded_error",
-            ErrorType::Unknown => "unknown_error",
-        }
-    }
-}
-
 // ============================================================================
 // Helper Functions
 // ============================================================================

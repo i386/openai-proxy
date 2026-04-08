@@ -84,6 +84,7 @@ impl OpenAIProxy {
                 let body = Full::new(Bytes::from(serde_json::json!({"status": "ok"}).to_string().into_bytes()));
                 Ok(Response::builder()
                     .status(StatusCode::OK)
+                    .header("Content-Type", "application/json")
                     .body(UnsyncBoxBody::new(body))
                     .unwrap())
             }
@@ -99,6 +100,7 @@ impl OpenAIProxy {
                 let body = Full::new(Bytes::from(serde_json::to_vec(&error).unwrap()));
                 Ok(Response::builder()
                     .status(StatusCode::NOT_FOUND)
+                    .header("Content-Type", "application/json")
                     .body(UnsyncBoxBody::new(body))
                     .unwrap())
             }
@@ -311,7 +313,7 @@ impl OpenAIProxy {
                         .unwrap())
                 }
                 Err(e) => {
-                    self.handle_error(e.into())
+                    self.handle_error(e)
                 }
             }
         } else {
@@ -325,7 +327,7 @@ impl OpenAIProxy {
                         .unwrap())
                 }
                 Err(e) => {
-                    self.handle_error(e.into())
+                    self.handle_error(e)
                 }
             }
         }
@@ -343,7 +345,7 @@ impl OpenAIProxy {
                     .unwrap())
             }
             Err(e) => {
-                self.handle_error(e.into())
+                self.handle_error(e)
             }
         }
     }
