@@ -14,7 +14,7 @@ use crate::backend::{
     InferenceBackend,
 };
 use crate::types::{
-    ChatCompletionChoice, ChatCompletionMessage, ChatMessage, ChatMessageContent,
+    ChatCompletionChoice, ChatCompletionMessage, ChatMessageContent,
     CreateChatCompletionRequest, CreateChatCompletionResponse, CreateChatCompletionStreamResponse,
     MessageRole, StreamChoice, StreamDelta, Usage,
 };
@@ -100,6 +100,7 @@ impl LlamaBackend {
         &self,
         url: &str,
         body: serde_json::Value,
+        model: String,
     ) -> BackendResult<BoxStream<'static, BackendResult<CreateChatCompletionStreamResponse>>> {
         let response = self
             .client
@@ -116,7 +117,6 @@ impl LlamaBackend {
             return Err(map_llama_error(status, error_json).into());
         }
 
-        let model = self.config.model.clone();
         let mut bytes_stream = response.bytes_stream();
         
         let s = stream! {
@@ -147,13 +147,15 @@ impl LlamaBackend {
                 
                 buffer = buffer[last_newline_pos..].to_string();
 
-                yield Ok(CreateChatCompletionStreamResponse {
-                    id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
-                    object: "chat.completion.chunk".to_string(),
-                    created: chrono::Utc::now().timestamp(),
-                    model: model.clone(),
-                    choices,
-                });
+                if !choices.is_empty() {
+                    yield Ok(CreateChatCompletionStreamResponse {
+                        id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
+                        object: "chat.completion.chunk".to_string(),
+                        created: chrono::Utc::now().timestamp(),
+                        model: model.clone(),
+                        choices,
+                    });
+                }
             }
         };
 
@@ -223,9 +225,10 @@ impl InferenceBackend for LlamaBackend {
         let url = format!("{}/v1/chat/completions", self.config.url());
         let mut req = request;
         req.stream = Some(true);
+        let model = req.model.clone();
         let body = self.map_request(&req);
 
-        self.handle_stream_response(&url, body).await
+        self.handle_stream_response(&url, body, model).await
     }
 
     /// List available models
@@ -278,35 +281,20 @@ fn map_llama_response(
         .map(|arr| {
             arr.iter()
                 .map(|choice| {
-                    let message = choice.get("message").map(|m| ChatMessage {
-                        role: MessageRole::Assistant,
-                        content: ChatMessageContent::Text(m.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string()),
-                        name: m.get("name").and_then(|n| n.as_str()).map(String::from),
-                        tool_calls: None,
-                        tool_call_id: None,
-                    }).unwrap_or(ChatMessage {
-                        role: MessageRole::Assistant,
-                        content: ChatMessageContent::Text("".to_string()),
-                        name: None,
-                        tool_calls: None,
-                        tool_call_id: None,
-                    });
+                    let message = choice.get("message");
+                    let content = message
+                        .and_then(|m| m.get("content"))
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("")
+                        .to_string();
 
                     let finish_reason = choice.get("finish_reason").and_then(|f| f.as_str()).map(String::from);
-                    
-                    let role_str = match message.role {
-                        MessageRole::System => "system",
-                        MessageRole::User => "user",
-                        MessageRole::Assistant => "assistant",
-                        MessageRole::Tool => "tool",
-                        MessageRole::Developer => "developer",
-                    };
 
                     ChatCompletionChoice {
                         index: choice.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as i32,
                         message: ChatCompletionMessage {
-                            role: role_str.to_string(),
-                            content: Some(message.content.as_str()),
+                            role: "assistant".to_string(),
+                            content: Some(content),
                             tool_calls: None,
                             refusal: None,
                             annotations: None,
