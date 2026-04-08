@@ -1,0 +1,21 @@
+# Rust build artifacts
+target/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project specific
+models/
+temp_gen/
+
+# Environment files
+.env
+.env.*
+!/.env.example
+
+# OS-generated files
+.DS_Store
+Thumbs.db
