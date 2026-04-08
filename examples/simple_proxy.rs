@@ -40,7 +40,7 @@ async fn main() {
     match backend.health().await {
         Ok(_) => println!("  Backend is healthy!"),
         Err(e) => {
-            eprintln!("  Warning: Backend health check failed: {}", e.message);
+            eprintln!("  Warning: Backend health check failed: {}", e);
             eprintln!("  Continuing anyway...");
         }
     }
