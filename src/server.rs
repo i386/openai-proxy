@@ -73,7 +73,7 @@ impl OpenAIProxy {
         // Route based on path and method
         match (method, path) {
             // Chat completions endpoint
-            (Method::POST, "/v1/chat/completions") => {
+            (Method::POST, "/v1/chat/completions") | (Method::POST, "/v1/responses") => {
                 self.handle_chat_completions(req, backend).await
             }
             
@@ -107,8 +107,9 @@ impl OpenAIProxy {
         req: Request<hyper::body::Incoming>,
         backend: &dyn InferenceBackend,
     ) -> Result<Response<Full<Bytes>>, Infallible> {
+        let path = req.uri().path().to_string();
         // Parse the request body
-        let body = match req.collect().await {
+        let body_bytes = match req.collect().await {
             Ok(collected) => collected.to_bytes().to_vec(),
             Err(e) => {
                 let error = ErrorResponse::invalid_request(
@@ -122,13 +123,90 @@ impl OpenAIProxy {
             }
         };
 
-        // Deserialize the request
-        let request: CreateChatCompletionRequest = match serde_json::from_slice(&body) {
-            Ok(req) => req,
+        // Deserialize as Value first to allow for normalization
+        let mut body_json: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+            Ok(val) => val,
             Err(e) => {
                 let error = ErrorResponse::invalid_request(
                     format!("Invalid JSON in request body: {}", e),
                     Some("body".to_string()),
+                );
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(Full::new(Bytes::from(serde_json::to_vec(&error).unwrap())))
+                    .unwrap());
+            }
+        };
+
+        // Normalize the request
+        if let Some(obj) = body_json.as_object_mut() {
+            // 1. Handle /v1/responses -> /v1/chat/completions translation
+            if path == "/v1/responses" {
+                if let Some(input) = obj.remove("input") {
+                    // Very basic translation of 'input' to 'messages'
+                    // In a real implementation we'd want to handle all block types
+                    let messages = if let Some(input_arr) = input.as_array() {
+                        let mut msgs = Vec::new();
+                        for item in input_arr {
+                            if let Some(item_obj) = item.as_object() {
+                                let role = item_obj.get("role").cloned().unwrap_or(serde_json::json!("user"));
+                                let content = if let Some(content_val) = item_obj.get("content") {
+                                    if let Some(content_arr) = content_val.as_array() {
+                                        let mut text_content = String::new();
+                                        for block in content_arr {
+                                            if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                                text_content.push_str(text);
+                                            }
+                                        }
+                                        serde_json::json!(text_content)
+                                    } else {
+                                        content_val.clone()
+                                    }
+                                } else {
+                                    serde_json::json!("")
+                                };
+                                msgs.push(serde_json::json!({
+                                    "role": role,
+                                    "content": content
+                                }));
+                            }
+                        }
+                        serde_json::json!(msgs)
+                    } else {
+                        input
+                    };
+                    obj.insert("messages".to_string(), messages);
+                }
+            }
+
+            // 2. Parameter aliasing
+            for alias in ["max_completion_tokens", "max_output_tokens"] {
+                if let Some(val) = obj.remove(alias) {
+                    obj.entry("max_tokens".to_string()).or_insert(val);
+                }
+            }
+
+            // 3. Role mapping (developer -> system)
+            if let Some(messages) = obj.get_mut("messages").and_then(|m| m.as_array_mut()) {
+                for msg in messages {
+                    if let Some(msg_obj) = msg.as_object_mut() {
+                        if let Some(role) = msg_obj.get_mut("role") {
+                            if role == "developer" {
+                                *role = serde_json::json!("system");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Deserialize the normalized request
+        let request: CreateChatCompletionRequest = match serde_json::from_value(body_json) {
+            Ok(req) => req,
+            Err(e) => {
+                let error = ErrorResponse::invalid_request(
+                    format!("Invalid request after normalization: {}", e),
+                    None,
                 );
                 return Ok(Response::builder()
                     .status(StatusCode::BAD_REQUEST)

@@ -141,4 +141,4 @@ cargo run --example simple_proxy
 
 ## License
 
-MIT
+Apache 2.0
